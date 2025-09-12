@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify
 CFG = {
     "RTSP_URL":   "rtsp://admin:Damin3001@192.168.12.101:554/",
     "DETECT_ONNX":"yolov5s.onnx",                 # YOLOv5 COCO (clock=74, person=0)
-    "DEPTH_ONNX": "midas_v21_small_256.onnx",     # opsional (MiDaS small 256)
+    # "DEPTH_ONNX": "midas_v21_small_256.onnx",     # opsional (MiDaS small 256)
     "IMG_SIZE":   640,
     "CONF_THRES": 0.25,
     "IOU_THRES":  0.45,
@@ -35,7 +35,7 @@ CFG = {
 # format: "IP_KAMERA": "http://IP_TUJUAN:PORT/path"
 DEST_ROUTE = {
     # contoh: http://192.168.68.146:8080
-    "192.168.12.101": "http://192.168.68.146:8080/collect",
+    "192.168.12.101": "http://192.168.12.65:8080/collect",
     # "192.168.20.45": "http://192.168.20.10:9000/api/ingest",
 }
 
@@ -607,3 +607,4 @@ if __name__ == "__main__":
         th = threading.Thread(target=periodic_sender, daemon=True)
         th.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)
+
