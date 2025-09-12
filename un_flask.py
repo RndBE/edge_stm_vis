@@ -1,4 +1,4 @@
-# flask_api.py
+# flask_api.py  — MiDaS bisa dinonaktifkan via CFG["USE_DEPTH"]
 import os, math, time, platform, subprocess, json, threading, socket
 from datetime import datetime
 from pathlib import Path
@@ -16,13 +16,18 @@ from flask import Flask, request, jsonify
 CFG = {
     "RTSP_URL":   "rtsp://admin:Damin3001@192.168.12.101:554/",
     "DETECT_ONNX":"yolov5s.onnx",                 # YOLOv5 COCO (clock=74, person=0)
-    # "DEPTH_ONNX": "midas_v21_small_256.onnx",     # opsional (MiDaS small 256)
+
+    # --- MiDaS / Depth (opsional) ---
+    "DEPTH_ONNX": "midas_v21_small_256.onnx",
+    "USE_DEPTH":  False if os.getenv("USE_DEPTH") is None else (os.getenv("USE_DEPTH","0") == "1"),
+
     "IMG_SIZE":   640,
     "CONF_THRES": 0.25,
     "IOU_THRES":  0.45,
     "ALLOWED_IDS": {0, 74},  # person=0, clock=74
     "CLOCK_ID":   74,
-    # Depth / occlusion
+
+    # Depth / occlusion (dipakai hanya jika USE_DEPTH=True)
     "DEPTH_CLOSER_IS_HIGHER": True,
     "FRONT_MARGIN": 0.03,
     "IOU_PAIR_THRESHOLD": 0.05,
@@ -32,16 +37,11 @@ CFG = {
 }
 
 # ROUTING: map IP kamera (src) -> URL tujuan (dest)
-# format: "IP_KAMERA": "http://IP_TUJUAN:PORT/path"
 DEST_ROUTE = {
-    # contoh: http://192.168.68.146:8080
     "192.168.12.101": "http://192.168.12.65:8080/collect",
-    # "192.168.20.45": "http://192.168.20.10:9000/api/ingest",
 }
-
-# Fallback kalau IP kamera tidak ada di DEST_ROUTE
-DEST_DEFAULT_URL = os.getenv("PUSH_URL", "").strip()     # ex: http://192.168.12.50:8080/collect
-DEST_IP   = os.getenv("DEST_IP", "").strip()             # ex: 192.168.12.50
+DEST_DEFAULT_URL = os.getenv("PUSH_URL", "").strip()
+DEST_IP   = os.getenv("DEST_IP", "").strip()
 DEST_PORT = int(os.getenv("DEST_PORT", "8080"))
 DEST_PATH = os.getenv("DEST_PATH", "/collect")
 
@@ -51,7 +51,7 @@ LISTEN_PORT = int(os.getenv("FLASK_PORT", "5000"))
 
 # Auto push (tanpa argumen CLI)
 AUTO_PUSH = True
-PUSH_INTERVAL_SEC = int(os.getenv("PUSH_INTERVAL_SEC", "300"))  # default 300s (5 menit)
+PUSH_INTERVAL_SEC = int(os.getenv("PUSH_INTERVAL_SEC", "300"))  # default 5 menit
 
 # =========================
 # UTIL: waktu & ping
@@ -97,7 +97,6 @@ def ping_host(host: str, count: int = 2, timeout_ms: int = 1000):
         cp = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
         out = (cp.stdout or "") + "\n" + (cp.stderr or "")
         ok, reason = interpret_ping_output(out, is_windows)
-        # Fallback macOS lama (-W tidak ada)
         if not ok and "illegal option -- w" in out.lower():
             cmd = ["ping", "-c", str(count), host]
             cp = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
@@ -295,10 +294,6 @@ def read_analog_time(roi_bgr):
 # ROUTING UTIL
 # =========================
 def choose_push_url(src_cam_ip: str) -> str:
-    """
-    Pilih URL tujuan berdasarkan IP kamera (src).
-    Prioritas: DEST_ROUTE[src] -> DEST_DEFAULT_URL -> (DEST_IP, DEST_PORT, DEST_PATH) -> ""
-    """
     if src_cam_ip in DEST_ROUTE:
         return DEST_ROUTE[src_cam_ip]
     if DEST_DEFAULT_URL:
@@ -308,16 +303,13 @@ def choose_push_url(src_cam_ip: str) -> str:
     return ""
 
 def route_meta(rtsp_url: str, push_url: str):
-    """
-    Metadata rute: IP asal kamera, IP pengirim (NIC lokal), IP tujuan.
-    """
     src_cam_ip = get_host_from_rtsp(rtsp_url)
     dest_ip = urlparse(push_url).hostname if push_url else None
     sender_ip = None
     if dest_ip:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect((dest_ip, 80))  # tidak kirim data; hanya untuk dapat IP lokal
+            s.connect((dest_ip, 80))
             sender_ip = s.getsockname()[0]
             s.close()
         except Exception:
@@ -349,6 +341,7 @@ class ClockReaderStream:
 
     def _load_models(self):
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+
         # YOLO
         if Path(self.cfg["DETECT_ONNX"]).exists():
             try:
@@ -358,17 +351,22 @@ class ClockReaderStream:
             self.det_in_name  = self.det_sess.get_inputs()[0].name
             self.det_out_name = self.det_sess.get_outputs()[0].name
             self.USE_FP16_DET = 'float16' in self.det_sess.get_inputs()[0].type.lower()
-        # MiDaS (opsional)
-        if Path(self.cfg["DEPTH_ONNX"]).exists():
+
+        # --- MiDaS (opsional, hormati USE_DEPTH) ---
+        use_depth = bool(self.cfg.get("USE_DEPTH", True))
+        depth_path = self.cfg.get("DEPTH_ONNX", "")
+        if use_depth and isinstance(depth_path, (str, os.PathLike)) and os.path.isfile(depth_path):
             try:
-                self.depth_sess = ort.InferenceSession(self.cfg["DEPTH_ONNX"], providers=providers)
+                self.depth_sess = ort.InferenceSession(depth_path, providers=providers)
             except Exception:
-                self.depth_sess = ort.InferenceSession(self.cfg["DEPTH_ONNX"], providers=['CPUExecutionProvider'])
+                self.depth_sess = ort.InferenceSession(depth_path, providers=['CPUExecutionProvider'])
             d_in_meta = self.depth_sess.get_inputs()[0]
             self.depth_in_name = d_in_meta.name
             shape = d_in_meta.shape
             if isinstance(shape,(list,tuple)) and len(shape)==4 and isinstance(shape[2],int) and isinstance(shape[3],int):
                 self.DEPTH_H, self.DEPTH_W = shape[2], shape[3]
+        else:
+            self.depth_sess = None  # benar-benar off
 
     def _detect(self, frame_bgr):
         img_lb, r, pad = letterbox(frame_bgr, (self.cfg["IMG_SIZE"], self.cfg["IMG_SIZE"]))
@@ -377,7 +375,6 @@ class ClockReaderStream:
         x = x[None, ...]
         out = self.det_sess.run([self.det_out_name], {self.det_in_name: x})[0]
         out = parse_yolov5_output(out)
-        H, W = frame_bgr.shape[:2]
 
         persons, clocks = [], []
         if out.shape[1] >= 6:
@@ -404,7 +401,8 @@ class ClockReaderStream:
         return persons, clocks
 
     def _depth_map(self, frame_bgr):
-        if self.depth_sess is None:
+        # hormati saklar USE_DEPTH
+        if (not self.cfg.get("USE_DEPTH", True)) or (self.depth_sess is None):
             return None
         d_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         d_inp = cv2.resize(d_rgb, (self.DEPTH_W, self.DEPTH_H), interpolation=cv2.INTER_LINEAR)
@@ -431,7 +429,7 @@ class ClockReaderStream:
             "ping_reason": ping_reason,
             "model": {
                 "yolo_loaded": self.det_sess is not None,
-                "depth_loaded": self.depth_sess is not None
+                "depth_loaded": (self.cfg.get("USE_DEPTH", True) and (self.depth_sess is not None))
             },
             "detected_clock": False,
             "jumlah_jam": 0,
@@ -477,14 +475,15 @@ class ClockReaderStream:
             base["status"] = "TIDAK TERDETEKSI"
             cap.release(); return base
 
-        d_norm = self._depth_map(frame) if (self.depth_sess is not None) else None
+        # depth hanya bila enabled
+        d_norm = self._depth_map(frame)
 
         x1,y1,x2,y2 = clocks[0]
         roi = frame[max(0,y1):min(H,y2), max(0,x1):min(W,x2)].copy()
 
-        occ_label = "TIDAK YAKIN"
+        occ_label = None
         is_front = False
-        if d_norm is not None:
+        if (self.cfg.get("USE_DEPTH", True)) and (d_norm is not None):
             ccx, ccy = (x1+x2)//2, (y1+y2)//2
             csize = max(5, int(CFG["CENTER_PATCH_FRAC"] * min(x2-x1, y2-y1)))
             d_clock = patch_median(d_norm, ccx, ccy, csize)
@@ -558,6 +557,7 @@ def send_data():
         "status_ip_cam": result["status_ip_cam"],
         "ping_reason": result["ping_reason"],
         "occlusion_status": result.get("occlusion_status"),
+        "depth_enabled": CFG.get("USE_DEPTH", True)
     }
     return jsonify(minimal), 200
 
@@ -574,6 +574,15 @@ def save_local(payload: dict, fname: str = "last_send_data.json"):
             json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[AUTO] gagal simpan {fname}: {e}")
+
+def choose_push_url(src_cam_ip: str) -> str:
+    if src_cam_ip in DEST_ROUTE:
+        return DEST_ROUTE[src_cam_ip]
+    if DEST_DEFAULT_URL:
+        return DEST_DEFAULT_URL
+    if DEST_IP:
+        return f"http://{DEST_IP}:{DEST_PORT}{DEST_PATH}"
+    return ""
 
 def periodic_sender():
     print(f"[AUTO] Auto-push aktif tiap {PUSH_INTERVAL_SEC}s. Routing berdasar IP kamera.")
@@ -607,4 +616,3 @@ if __name__ == "__main__":
         th = threading.Thread(target=periodic_sender, daemon=True)
         th.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)
-
