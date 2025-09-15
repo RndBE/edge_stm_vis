@@ -38,7 +38,7 @@ CFG = {
 
 # ROUTING: map IP kamera (src) -> URL tujuan (dest)
 DEST_ROUTE = {
-    "192.168.12.101": "http://192.168.12.65:8080/collect",
+    "192.168.12.101": "http://192.168.10.10:8080/collect",
 }
 DEST_DEFAULT_URL = os.getenv("PUSH_URL", "").strip()
 DEST_IP   = os.getenv("DEST_IP", "").strip()
@@ -616,3 +616,4 @@ if __name__ == "__main__":
         th = threading.Thread(target=periodic_sender, daemon=True)
         th.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)
+
